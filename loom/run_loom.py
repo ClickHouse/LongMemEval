@@ -40,6 +40,7 @@ import argparse
 import asyncio
 import json
 import os
+import random
 import re
 import sys
 import uuid
@@ -200,6 +201,10 @@ async def main() -> int:
     p.add_argument("--dataset", default="data/longmemeval_s_cleaned.json")
     p.add_argument("--out", default="loom/loom_hyp.jsonl", help="hypotheses JSONL for evaluate_qa.py")
     p.add_argument("--limit", type=int, default=0, help="cap questions (0 = all 500)")
+    p.add_argument("--shuffle", action="store_true",
+                   help="shuffle before --limit (the dataset is category-ordered, so a "
+                        "bare --limit samples a single question type). Deterministic via --seed.")
+    p.add_argument("--seed", type=int, default=42, help="shuffle seed")
     p.add_argument("--top-k", type=int, default=30)
     p.add_argument("--search-mode", default="rrf",
                    help="Loom search mode; 'rrf' = let Loom's planner self-route")
@@ -220,6 +225,8 @@ async def main() -> int:
               f"-O {ds_path}", file=sys.stderr)
         return 2
     dataset = json.loads(ds_path.read_text())
+    if args.shuffle:
+        random.Random(args.seed).shuffle(dataset)
     if args.limit > 0:
         dataset = dataset[: args.limit]
     print(f"loom-longmemeval: {len(dataset)} questions, top_k={args.top_k}, "

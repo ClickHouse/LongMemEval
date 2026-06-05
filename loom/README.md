@@ -47,7 +47,7 @@ python loom/run_loom.py \
   --base-url http://127.0.0.1:7777 \
   --dataset data/longmemeval_s_cleaned.json \
   --out loom/loom_hyp.jsonl \
-  --limit 40
+  --limit 40 --shuffle   # omit --limit for the full 500; --shuffle gives a mixed sample
 
 # 2) Grade with the OFFICIAL judge (gpt-4o, per-question-type prompts).
 python src/evaluation/evaluate_qa.py gpt-4o loom/loom_hyp.jsonl data/longmemeval_s_cleaned.json
