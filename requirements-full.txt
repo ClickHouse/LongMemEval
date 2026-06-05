@@ -10,7 +10,7 @@ ninja==1.11.1.1
 openai==1.35.1
 pillow==10.2.0
 protobuf==5.27.1
-pyarrow==16.1.0
+pyarrow==23.0.1
 rank-bm25==0.2.2
 regex==2024.5.15
 requests==2.32.3
