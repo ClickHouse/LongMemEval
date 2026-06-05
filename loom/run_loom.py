@@ -205,6 +205,10 @@ async def main() -> int:
                    help="shuffle before --limit (the dataset is category-ordered, so a "
                         "bare --limit samples a single question type). Deterministic via --seed.")
     p.add_argument("--seed", type=int, default=42, help="shuffle seed")
+    p.add_argument("--question-type", default="",
+                   help="comma-separated question_type filter (e.g. "
+                        "single-session-assistant,knowledge-update); applied before "
+                        "--shuffle/--limit so a category can be run complete. Empty = all.")
     p.add_argument("--top-k", type=int, default=30)
     p.add_argument("--search-mode", default="rrf",
                    help="Loom search mode; 'rrf' = let Loom's planner self-route")
@@ -225,6 +229,9 @@ async def main() -> int:
               f"-O {ds_path}", file=sys.stderr)
         return 2
     dataset = json.loads(ds_path.read_text())
+    if args.question_type:
+        wanted = {t.strip() for t in args.question_type.split(",") if t.strip()}
+        dataset = [d for d in dataset if str(d.get("question_type", "")) in wanted]
     if args.shuffle:
         random.Random(args.seed).shuffle(dataset)
     if args.limit > 0:
