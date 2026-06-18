@@ -2,43 +2,19 @@
 
 [Loom](https://github.com/ClickHouse/loom) is a ClickHouse-backed memory service.
 This integration plugs it into LongMemEval at the **indexing + retrieval** stages,
-reads with the repo's official reader prompt, and grades with a **fair,
-field-consensus semantic judge** — the same kind of judge the other published
-memory systems use — so the resulting QA number is comparable to theirs.
+reads with the official reader prompt, and grades QA accuracy with the repo's
+semantic judge (`src/evaluation/evaluate_qa.py`).
 
 | stage | who does it |
 |-------|-------------|
 | indexing + retrieval | **Loom** (`loom/run_loom.py` — ingest via `memory.set_from_messages`, retrieve via `memory.search`) |
 | reading (answer generation) | the official `src/generation/run_generation.py` prompt, replicated in `run_loom.py` (facts variant, step-by-step) |
-| judging | `src/evaluation/evaluate_qa.py` — the **fair** semantic judge (default); see [Judging](#judging) |
+| judging | `src/evaluation/evaluate_qa.py` — semantic judge (gpt-4o), per question type |
 
 Only the ingest+retrieve stage is Loom's; the reader is the standard official one.
 (The official `src/retrieval/run_retrieval.py` is built around in-process
 retrievers — BM25 / Contriever / Stella / GTE over a flat corpus — and has no
 hook for an external memory *service*, which is why this adapter exists.)
-
-## Judging
-
-The published memory benchmarks do **not** grade with the bare upstream judge —
-each uses its own semantic-equivalence grader (mem0 and Zep both ship a custom
-LongMemEval judge). To compare like-for-like, Loom reports under one **fair**
-semantic judge (`--judge-style fair`, the default), built so every rule it adds
-to the official `anscheck` prompt is one that the official judge **or both**
-competitor graders already apply:
-
-- judge by meaning, not exact wording (paraphrase = correct);
-- a correct answer plus extra correct detail (a superset) is correct, unless the
-  extra is factually wrong;
-- a more specific / more precise answer that entails the correct answer is
-  correct (e.g. "22 days" for "3 weeks");
-- temporal off-by-one tolerance (already in the official judge).
-
-It **excludes** mem0-only catch-alls ("if the user would be satisfied", symmetric
-"0" ≈ "not enough information", rounding for non-temporal numbers) so it sits in
-the field's strictness band: **not stricter than Zep (no benchmin), not looser
-than mem0 (no benchmax)**. We report this one number — the same way competitors
-report one. The upstream strict judge stays available for reproducibility via
-`--judge-style official`, but we don't headline two numbers.
 
 ## Prerequisites
 
@@ -73,8 +49,7 @@ python loom/run_loom.py \
   --out loom/loom_hyp.jsonl \
   --limit 40 --shuffle   # omit --limit for the full 500; --shuffle gives a mixed sample
 
-# 2) Grade with the fair semantic judge (gpt-4o, per-question-type prompts).
-#    Add --judge-style official to reproduce the upstream strict judge instead.
+# 2) Grade QA accuracy (gpt-4o judge, per question type).
 python src/evaluation/evaluate_qa.py gpt-4o loom/loom_hyp.jsonl data/longmemeval_s_cleaned.json
 ```
 

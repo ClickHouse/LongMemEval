@@ -60,6 +60,24 @@ _ANSWER_PROMPT = (
     "and a user. Please answer the question based on the relevant facts. "
     "Answer the question step by step: first extract all the relevant "
     "information, and then reason over the information to get the answer."
+    "\n\nMemories are listed oldest-first by Date. When deriving the answer:"
+    "\n- If two facts about the same attribute (a value, count, location, "
+    "brand, goal, status) conflict, the MOST RECENT by Date is current — use "
+    "it; do not average, sum, or call them contradictory."
+    "\n- For count/sum/'how many'/'total' questions, enumerate every distinct "
+    "qualifying instance as a list BEFORE counting; treat differing "
+    "quantities, dates, or occasions as SEPARATE instances; merge facts that "
+    "refer to the same person/thing (coreference); do NOT count "
+    "planned/considered/hypothetical items as actual."
+    "\n- For 'how long between'/'how many days' questions, use the Date of "
+    "each relevant memory as the event date and compute the difference; only "
+    "say you cannot compute it if a needed Date is genuinely absent."
+    "\n- When a 'Computed from structured records' block is present below, it "
+    "is an EXACT server-side aggregate (COUNT / SUM / date-diff) over "
+    "per-occurrence records — treat it as authoritative for the numeric part "
+    "of the answer and prefer it over re-counting the chats by hand, UNLESS "
+    "the chats plainly show a qualifying instance it omitted."
+    "{computed}"
     "\n\n\nHistory Chats:\n\n{history}\n\nCurrent Date: {date}\nQuestion: "
     "{question}\nAnswer (step by step):"
 )
@@ -92,12 +110,22 @@ async def _post(client: httpx.AsyncClient, url: str, body: dict, token: str,
     raise RuntimeError("unreachable")
 
 
-def _history_block(hits: list[dict]) -> str:
+def _history_block(hits: list[dict], key_to_date: dict | None = None) -> str:
     """Render retrieved memories as dated blocks, oldest first (mirrors the
     official run_generation.py per-session formatting)."""
+    key_to_date = key_to_date or {}
     def date_of(h: dict) -> str:
         d = (h.get("valid_at") or h.get("temporal_anchor") or "").strip()
-        return "" if d.startswith("1970-01-01") else d[:10]  # epoch sentinel = undated
+        if d.startswith("1970-01-01"):  # epoch sentinel = undated
+            d = ""
+        if not d:
+            # Fallback to the SOURCE SESSION's observation_date. ~90% of stored
+            # memories have a NULL temporal_anchor (extraction forces NULL for
+            # durable/state facts), which made date-diff questions render
+            # "Date: unknown" and the reader answer "cannot calculate" — even
+            # though the operand IS the session date the bench holds at ingest.
+            d = (key_to_date.get(str(h.get("memory_key") or "")) or "").strip()
+        return d[:10] if d else ""
 
     blocks = []
     for i, h in enumerate(sorted(hits, key=lambda h: date_of(h) or "9999")):
@@ -107,17 +135,75 @@ def _history_block(hits: list[dict]) -> str:
     return "\n".join(blocks) or "(no facts retrieved)"
 
 
+def _derived_block(derived: dict | None) -> str:
+    """Render the server-computed derived aggregate (co-design [D]) as an
+    authoritative operand block. Empty string when absent so the {computed}
+    slot collapses on non-derived questions."""
+    if not derived:
+        return ""
+    op = str(derived.get("op") or "")
+    parts: list[str] = []
+    cnt = derived.get("count")
+    if cnt is not None:
+        parts.append(f"occurrences counted: {cnt}")
+    if derived.get("sum") is not None:
+        parts.append(f"sum of amounts: {derived['sum']:g}")
+    if derived.get("avg") is not None:
+        parts.append(f"average amount: {derived['avg']:g}")
+    fa, la = derived.get("first_at"), derived.get("last_at")
+    if fa:
+        parts.append(f"earliest occurrence: {str(fa)[:10]}")
+    if la:
+        parts.append(f"latest occurrence: {str(la)[:10]}")
+    sd = derived.get("span_days")
+    if sd is not None:
+        parts.append(
+            f"span first->last: {round(sd)} days (~{round(sd / 7)} weeks)"
+        )
+    items = derived.get("items") or []
+    if items:
+        listed = "; ".join(
+            (it.get("object") or "").strip()
+            + (
+                f"={it['numeric_value']:g}{it.get('unit') or ''}"
+                if it.get("numeric_value") is not None
+                else ""
+            )
+            + (f" on {str(it.get('occurred_at'))[:10]}" if it.get("occurred_at") else "")
+            for it in items[:40]
+        )
+        parts.append(f"instances: {listed}")
+    if not parts:
+        return ""
+    hedge = (
+        " (category filter was broadened to predicate-only — may include "
+        "unrelated instances; cross-check the chats)"
+        if derived.get("category_broadened")
+        else ""
+    )
+    return (
+        "\n\nComputed from structured records (exact aggregate over "
+        f"per-occurrence rows; op={op}){hedge}:\n- " + "\n- ".join(parts)
+    )
+
+
 async def _answer(client: httpx.AsyncClient, question: str, hits: list[dict],
-                  question_date: str, model: str, api_key: str) -> str:
+                  question_date: str, model: str, api_key: str,
+                  key_to_date: dict | None = None,
+                  derived: dict | None = None) -> str:
     body = {
         "model": model,
-        "temperature": 0.0,
         "messages": [{"role": "user", "content": _ANSWER_PROMPT.format(
-            history=_history_block(hits),
+            history=_history_block(hits, key_to_date),
             date=question_date or "unknown",
             question=question,
+            computed=_derived_block(derived),
         )}],
     }
+    # Reasoning models (gpt-5, o-series) reject temperature != 1; only set it
+    # for models that support it, so gpt-4o behavior stays byte-identical.
+    if not re.match(r"^(gpt-5|o[1-9])", model):
+        body["temperature"] = 0.0
     r = await client.post(
         "https://api.openai.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -137,6 +223,13 @@ async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: 
         dates = item.get("haystack_dates", []) or []
         sids = item.get("haystack_session_ids", []) or []
         key_to_sessions: dict[str, set[str]] = {}
+        # session_id -> ISO observation date (the bench holds these; used as the
+        # date-fallback when a memory's temporal_anchor/valid_at is NULL).
+        sid_to_date: dict[str, str] = {
+            str(sids[i]): _iso(dates[i])
+            for i in range(min(len(sids), len(dates)))
+            if sids[i] and _iso(dates[i])
+        }
 
         # 1-2) Index every session (concurrently, bounded). One memory.set_from_messages
         # per session is the natural indexing unit and the only tractable granularity
@@ -162,17 +255,26 @@ async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: 
         await asyncio.gather(*(ingest(i, s) for i, s in enumerate(sessions)))
 
         # 3) Retrieve. search_mode=rrf lets Loom's planner self-route (it never
-        # sees the gold question_type). Built-in reranker enabled per request.
+        # sees the gold question_type). NO reranker: the builtin:openai generative
+        # reranker cost ~6-10s/search (one gpt-4o-mini JSON-gen call over 150
+        # candidates) and was quality-NEGATIVE here — paired A/B on identical data
+        # scored rerank-OFF 85.7% vs rerank-ON 78.6% QA, and fact-recall@50 rrf
+        # 37.9% vs plain-cosine 39.7% (tied). RRF fusion over CH's vector+lexical+
+        # chunk planes is the ranker; CH's vector read is 0.36s. This matches Loom's
+        # product default (rerank=""), so the bench now reflects real Loom latency.
         search_body: dict = {
             **identity, "query": str(item["question"]), "top_k": top_k,
             "search_mode": search_mode, "alpha": 0.5, "include_top_n_unmatched": 120,
-            "rerank": "builtin:openai",
         }
         q_iso = _iso(str(item.get("question_date", "")))
         if q_iso:
             search_body["observation_date"] = q_iso
         resp = await _post(client, base_url + "/v1/memory.search", search_body, token)
         hits = resp.get("results", [])
+        # Co-design [D]: server-computed COUNT/SUM/date-diff over per-occurrence
+        # derived_facts. None on non-derived questions / empty match — the
+        # reader then falls back to counting the recalled passages by hand.
+        derived = resp.get("derived_aggregate")
 
         # Evidence-session recall@k: did retrieval surface a memory from any
         # labelled gold evidence session? (the standard LongMemEval retrieval metric)
@@ -182,15 +284,46 @@ async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: 
             retrieved |= key_to_sessions.get(str(h.get("memory_key") or ""), set())
         retrieved.discard("")
         recalled = bool(answer_sessions & retrieved) if answer_sessions else False
+        # ALL-session coverage@k: did the top-k cover EVERY gold evidence session?
+        # This is the real multi-hop completeness metric. "recalled" (ANY gold
+        # session) over-counts: a 5-session question scores a hit on 1 of 5.
+        all_covered = bool(answer_sessions) and answer_sessions <= retrieved
+
+        # Fact-level recall@k: is the gold ANSWER string actually present in any
+        # retrieved excerpt? Session recall ("a memory from the gold session came
+        # back") systematically over-counts vs QA; this tracks QA far better.
+        gold = re.sub(r"\s+", " ", str(item.get("answer", "")).strip().lower())
+
+        def _present(hay: str) -> bool:
+            # Word-boundary match for short golds ("4", "nike") so they don't
+            # spuriously match inside other tokens; substring for long ones.
+            if not gold:
+                return False
+            if len(gold) <= 12:
+                return re.search(r"(?<![a-z0-9])" + re.escape(gold) + r"(?![a-z0-9])", hay) is not None
+            return gold in hay
+
+        fact_in_context = any(
+            _present(re.sub(r"\s+", " ", (h.get("content_excerpt") or "").lower()))
+            for h in hits[:top_k]
+        )
 
         # 4) Read: generate an answer with the official reader prompt.
+        # memory_key -> source-session date (earliest), for the date-fallback.
+        key_to_date = {
+            k: min((sid_to_date[s] for s in ss if s in sid_to_date), default="")
+            for k, ss in key_to_sessions.items()
+        }
         hypothesis = await _answer(client, str(item["question"]), hits,
-                                   str(item.get("question_date", "")), model, api_key)
+                                   str(item.get("question_date", "")), model, api_key,
+                                   key_to_date=key_to_date, derived=derived)
         return {
             "question_id": str(item["question_id"]),
             "question_type": str(item.get("question_type", "")),
             "hypothesis": hypothesis,
             "recalled": recalled,
+            "all_covered": all_covered,
+            "fact_in_context": fact_in_context,
         }
 
 
@@ -280,6 +413,33 @@ async def main() -> int:
     tot = [r["recalled"] for r in results]
     print(f"  {'OVERALL':28} {sum(tot)}/{len(tot)} "
           f"({sum(tot) / len(tot) * 100:.1f}%)" if tot else "  (no results)")
+
+    # ALL-session coverage@k: did the top-k cover EVERY gold evidence session?
+    # (multi-hop completeness — the ANY-session recall above hides this)
+    cby: dict[str, list[bool]] = defaultdict(list)
+    for r in results:
+        cby[r["question_type"]].append(r.get("all_covered", False))
+    print(f"\nALL-session coverage@{args.top_k} (every gold session in top-k — multi-hop completeness):")
+    for qt in sorted(cby):
+        v = cby[qt]
+        print(f"  {qt:28} {sum(v)}/{len(v)} ({sum(v) / len(v) * 100:.1f}%)")
+    ctot = [r.get("all_covered", False) for r in results]
+    print(f"  {'OVERALL':28} {sum(ctot)}/{len(ctot)} "
+          f"({sum(ctot) / len(ctot) * 100:.1f}%)" if ctot else "  (no results)")
+
+    # Fact-level recall@k by question type: did the gold answer string actually
+    # reach the reader? This is the number that tracks QA (session recall does not).
+    fby: dict[str, list[bool]] = defaultdict(list)
+    for r in results:
+        fby[r["question_type"]].append(r.get("fact_in_context", False))
+    print(f"\nFACT-level recall@{args.top_k} (gold answer present in a retrieved excerpt):")
+    for qt in sorted(fby):
+        v = fby[qt]
+        print(f"  {qt:28} {sum(v)}/{len(v)} ({sum(v) / len(v) * 100:.1f}%)")
+    ftot = [r.get("fact_in_context", False) for r in results]
+    print(f"  {'OVERALL':28} {sum(ftot)}/{len(ftot)} "
+          f"({sum(ftot) / len(ftot) * 100:.1f}%)" if ftot else "  (no results)")
+
     print(f"\nwrote {out_path}\nNow grade with the official judge:\n"
           f"  python src/evaluation/evaluate_qa.py gpt-4o {out_path} {args.dataset}")
     return 0
