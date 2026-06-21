@@ -59,7 +59,25 @@ median (at a possible recall cost) — neither is applied in these numbers. Late
 measured one query at a time on a quiesced server (no concurrent ingest); the in-run
 under-load figure is higher and not reported here.
 
-## Context: other published numbers
+## Measurement scope (and why latency/tokens are not cross-system comparable)
+
+The latency and token figures above are **Loom's own measurements on this hardware**,
+reported to characterize Loom — not to rank it against other systems:
+
+- **Latency** is the wall-clock of the `memory.search` call (client-side), which
+  *includes* Loom's read-path query-planning LLM (~32% of queries), HyDE LLM (10%),
+  and the remote embedding RTT. A graph-read memory store with no read-time LLM and
+  local/cached embeddings is measuring a different operation — so published search
+  latencies (e.g. ~100ms figures) are **not** like-for-like with this number.
+- **Tokens** is `chars/4` of the retrieved context at `top_k=200`; other systems
+  publish a real tokenizer count over a curated ~20-item context. Different tokenizer
+  and different retrieval breadth.
+
+A genuine cross-system latency/token comparison requires running every system through
+one harness on one machine, timing the search call identically and tokenizing each
+context the same way. That has not been done here.
+
+## Context: other published accuracy numbers
 
 LongMemEval-S accuracy is published by other systems under *their own* reader+judge,
 so the figures are not directly comparable without matching the instrument:
