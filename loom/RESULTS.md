@@ -51,6 +51,25 @@ swapping the judge gpt-4o→gpt-5 moves it ~−4pt (the gpt-5 judge is stricter,
 entirely on the open-ended preference rubric). So the headline is as much a property of
 the reader and judge as of the memory.
 
+## Latency
+
+Loom's default retrieval runs LLM-in-loop work on the read path — query planning, and a
+HyDE recall-rescue when the top hit is weak. That helps on paraphrase-heavy or
+sparse-memory workloads, but on LongMemEval (recall already 99.6%) it does **not** change
+which memories are retrieved. Running retrieval at `--retrieval-budget fast` (pure vector
+path, no read-path LLM) holds accuracy and recall while cutting latency ~7×:
+
+| retrieval budget | accuracy (gpt-5 judge) | fact recall | search p50 |
+|---|---|---|---|
+| default | 88.9% | 47/99 | ~1,000 ms |
+| **fast** (pure vector) | **90.9%** | 47/99 | **~140 ms** |
+
+Paired: one ingest, the same 99 questions, only the retrieval budget differs. Recall is
+identical (differs on 0 questions) and the accuracy gap is within n=99 noise — the point
+is **fast loses nothing.** So for QA-style workloads `--retrieval-budget fast` is the
+latency-optimal setting; the LLM-in-loop default buys recall robustness this workload
+does not need.
+
 ## Context: other published accuracy numbers
 
 LongMemEval-S accuracy is published by other systems under *their own* reader+judge, so
@@ -66,11 +85,12 @@ preference rubric) and 5 genuine errors, which would put Loom's honestly-graded 
 nearer ~92%; but a fair use of that requires the same re-adjudication on the other systems'
 answers, which has not been done. **The honest matched number is 88.4%.**
 
-> `run_loom.py` can also report retrieval latency, context-token size, and the HyDE
-> fallback rate (`--measure-latency`, `--metrics-out`). Those are Loom's own
-> operational measurements; they are not comparable to other systems' published
-> latency/token figures (different harness, hardware, read-path, and tokenizer), so
-> they are not presented as a head-to-head here.
+> The latency above and the context-token / HyDE-rate figures from
+> `run_loom.py --measure-latency --metrics-out` are Loom's own operational
+> measurements on this hardware. They are **not** comparable to other systems'
+> published latency/token numbers (different harness, hardware, read path, and
+> tokenizer), so no cross-system latency/token ranking is claimed here — only the
+> Loom default-vs-fast comparison above.
 
 ## Reproduce
 

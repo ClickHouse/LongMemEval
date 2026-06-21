@@ -216,7 +216,8 @@ async def _answer(client: httpx.AsyncClient, question: str, hits: list[dict],
 
 async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: dict,
                     *, top_k: int, search_mode: str, ingest_conc: int,
-                    model: str, api_key: str, item_sem: asyncio.Semaphore) -> dict:
+                    model: str, api_key: str, retrieval_budget: str,
+                    item_sem: asyncio.Semaphore) -> dict:
     async with item_sem:
         ns = f"lme-{uuid.uuid4().hex[:10]}"
         identity = {"org": "dev", "namespace": ns, "agent": "lme-loom", "user_id": "-"}
@@ -267,6 +268,11 @@ async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: 
             **identity, "query": str(item["question"]), "top_k": top_k,
             "search_mode": search_mode, "alpha": 0.5, "include_top_n_unmatched": 120,
         }
+        # retrieval_budget="fast" = pure vector path: no query-planning / HyDE LLM
+        # on the read path. On this benchmark it holds recall + accuracy at ~7x
+        # lower latency, since the LLM-in-loop work doesn't change what's retrieved.
+        if retrieval_budget:
+            search_body["retrieval_budget"] = retrieval_budget
         q_iso = _iso(str(item.get("question_date", "")))
         if q_iso:
             search_body["observation_date"] = q_iso
@@ -363,6 +369,11 @@ async def main() -> int:
     p.add_argument("--ingest-concurrency", type=int, default=8,
                    help="concurrent index calls per question")
     p.add_argument("--answer-model", default="gpt-4o", help="reader model (OpenAI)")
+    p.add_argument("--retrieval-budget", default="",
+                   help="Loom retrieval budget. 'fast' = pure vector path, no "
+                        "query-planning/HyDE LLM on the read path (lowest latency); "
+                        "'' = product default. On LongMemEval, fast holds recall + "
+                        "accuracy at ~7x lower latency.")
     p.add_argument("--measure-latency", action="store_true",
                    help="after all ingestion, re-search every question one-at-a-time on the "
                         "now-quiesced server to report CLEAN serving latency (the in-run "
@@ -407,6 +418,7 @@ async def main() -> int:
                                     top_k=args.top_k, search_mode=args.search_mode,
                                     ingest_conc=args.ingest_concurrency,
                                     model=args.answer_model, api_key=api_key,
+                                    retrieval_budget=args.retrieval_budget,
                                     item_sem=item_sem)
                 results.append(r)
                 print(f"  {'✓' if r['recalled'] else '✗'} {r['question_id']} "
@@ -496,6 +508,8 @@ async def main() -> int:
                       "alpha": 0.5, "include_top_n_unmatched": 120}
                 if r.get("q_iso"):
                     sb["observation_date"] = r["q_iso"]
+                if args.retrieval_budget:  # measure the same path the run used
+                    sb["retrieval_budget"] = args.retrieval_budget
                 t0 = time.perf_counter()
                 try:
                     await _post(lc, args.base_url + "/v1/memory.search", sb, args.token)
