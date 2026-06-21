@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import json
 import argparse
@@ -13,6 +14,7 @@ model_zoo = {
     'llama-3.1-70b-instruct': ('meta-llama/Meta-Llama-3.1-70B-Instruct', 'local'),
     'gpt-4o-mini': ('gpt-4o-mini-2024-07-18', 'openai'),
     'gpt-4o': ('gpt-4o-2024-08-06', 'openai'),
+    'gpt-5': ('gpt-5', 'openai'),
 }
 
 
@@ -72,11 +74,14 @@ def get_anscheck_prompt(task, question, answer, response, abstention=False):
 
 
 def judge(client, model, prompt):
-    completion = chat_completions_with_backoff(
-        client, model=model, n=1, temperature=0, max_tokens=10,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return 'yes' in completion.choices[0].message.content.strip().lower()
+    kwargs = dict(client=client, model=model, n=1,
+                  messages=[{"role": "user", "content": prompt}])
+    # Reasoning models (gpt-5, o-series) reject temperature/max_tokens and need
+    # headroom for reasoning tokens; non-reasoning models stay byte-identical.
+    if not re.match(r"^(gpt-5|o[1-9])", model):
+        kwargs.update(temperature=0, max_tokens=10)
+    completion = chat_completions_with_backoff(**kwargs)
+    return 'yes' in (completion.choices[0].message.content or '').strip().lower()
 
 
 if __name__ == '__main__':

@@ -43,6 +43,7 @@ import os
 import random
 import re
 import sys
+import time
 import uuid
 from collections import defaultdict
 from pathlib import Path
@@ -269,8 +270,11 @@ async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: 
         q_iso = _iso(str(item.get("question_date", "")))
         if q_iso:
             search_body["observation_date"] = q_iso
+        _t0 = time.perf_counter()
         resp = await _post(client, base_url + "/v1/memory.search", search_body, token)
+        search_ms = (time.perf_counter() - _t0) * 1000.0  # NB: under-load (concurrent ingest)
         hits = resp.get("results", [])
+        hyde_fired = bool(resp.get("hyde_fallback_used"))
         # Co-design [D]: server-computed COUNT/SUM/date-diff over per-occurrence
         # derived_facts. None on non-derived questions / empty match — the
         # reader then falls back to counting the recalled passages by hand.
@@ -314,6 +318,9 @@ async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: 
             k: min((sid_to_date[s] for s in ss if s in sid_to_date), default="")
             for k, ss in key_to_sessions.items()
         }
+        # Token efficiency = size of the context Loom actually hands the reader
+        # (the rendered history block, formatting included). ~4 chars/token.
+        ctx_tokens = len(_history_block(hits, key_to_date)) // 4
         hypothesis = await _answer(client, str(item["question"]), hits,
                                    str(item.get("question_date", "")), model, api_key,
                                    key_to_date=key_to_date, derived=derived)
@@ -324,6 +331,13 @@ async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: 
             "recalled": recalled,
             "all_covered": all_covered,
             "fact_in_context": fact_in_context,
+            "ctx_tokens": ctx_tokens,
+            "search_ms_loaded": round(search_ms, 1),
+            "hyde_fired": hyde_fired,
+            "n_hits": len(hits),
+            "ns": ns,
+            "query": str(item["question"]),
+            "q_iso": q_iso,
         }
 
 
@@ -349,6 +363,13 @@ async def main() -> int:
     p.add_argument("--ingest-concurrency", type=int, default=8,
                    help="concurrent index calls per question")
     p.add_argument("--answer-model", default="gpt-4o", help="reader model (OpenAI)")
+    p.add_argument("--measure-latency", action="store_true",
+                   help="after all ingestion, re-search every question one-at-a-time on the "
+                        "now-quiesced server to report CLEAN serving latency (the in-run "
+                        "search time is measured under concurrent-ingest load and is not "
+                        "comparable to how Zep/mem0 report search latency)")
+    p.add_argument("--metrics-out", default="",
+                   help="write the latency/token/recall/HyDE metrics summary as JSON here")
     args = p.parse_args()
 
     api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -439,6 +460,68 @@ async def main() -> int:
     ftot = [r.get("fact_in_context", False) for r in results]
     print(f"  {'OVERALL':28} {sum(ftot)}/{len(ftot)} "
           f"({sum(ftot) / len(ftot) * 100:.1f}%)" if ftot else "  (no results)")
+
+    def _pct(xs: list, q: float):
+        return xs[min(len(xs) - 1, int(len(xs) * q))] if xs else 0
+
+    # Token efficiency: the size of the context Loom hands the reader per query.
+    toks = sorted(r.get("ctx_tokens", 0) for r in results)
+    tok_median = _pct(toks, 0.5)
+    tok_mean = round(sum(toks) / len(toks)) if toks else 0
+    mem_mean = sum(r.get("n_hits", 0) for r in results) // max(1, len(results))
+    print(f"\nTOKEN efficiency (context served to reader, ~4 chars/token):"
+          f"\n  median {tok_median} tok/query   mean {tok_mean}   (~{mem_mean} memories/query)")
+
+    # HyDE fallback firing rate (recall-rescue LLM call; fires only on a weak top hit).
+    hyde_n = sum(1 for r in results if r.get("hyde_fired"))
+    print(f"\nHyDE fallback fired on {hyde_n}/{len(results)} "
+          f"({hyde_n / len(results) * 100:.1f}%) queries" if results else "")
+
+    # In-run search latency is measured UNDER concurrent-ingest load — reported
+    # but NOT comparable to how Zep/mem0 publish search latency.
+    ld = sorted(r.get("search_ms_loaded", 0.0) for r in results)
+    print(f"\nIn-run search latency UNDER LOAD (concurrent ingest — not comparable): "
+          f"p50 {_pct(ld, 0.5):.0f}ms  p95 {_pct(ld, 0.95):.0f}ms")
+
+    # Clean serving latency: re-search every question one-at-a-time on the now-
+    # quiesced server (no concurrent ingest) — the true single-query latency,
+    # comparable to Zep/mem0. Namespaces persist after the run.
+    clean: list[float] = []
+    if args.measure_latency and results:
+        print(f"\nmeasuring CLEAN serving latency over {len(results)} quiesced searches...", flush=True)
+        async with httpx.AsyncClient(timeout=120.0) as lc:
+            for r in results:
+                sb = {"org": "dev", "namespace": r["ns"], "agent": "lme-loom", "user_id": "-",
+                      "query": r["query"], "top_k": args.top_k, "search_mode": args.search_mode,
+                      "alpha": 0.5, "include_top_n_unmatched": 120}
+                if r.get("q_iso"):
+                    sb["observation_date"] = r["q_iso"]
+                t0 = time.perf_counter()
+                try:
+                    await _post(lc, args.base_url + "/v1/memory.search", sb, args.token)
+                except httpx.HTTPError:
+                    continue
+                clean.append((time.perf_counter() - t0) * 1000.0)
+        clean.sort()
+        if clean:
+            print(f"CLEAN serving latency (quiesced, 1 query at a time): "
+                  f"p50 {_pct(clean, 0.5):.0f}ms  p95 {_pct(clean, 0.95):.0f}ms  min {clean[0]:.0f}ms")
+
+    if args.metrics_out and results:
+        n = len(results)
+        metrics = {
+            "n_questions": n, "top_k": args.top_k, "answer_model": args.answer_model,
+            "recall_session_pct": round(sum(r["recalled"] for r in results) / n * 100, 1),
+            "recall_allsession_pct": round(sum(r.get("all_covered", False) for r in results) / n * 100, 1),
+            "recall_fact_pct": round(sum(r.get("fact_in_context", False) for r in results) / n * 100, 1),
+            "ctx_tokens_median": tok_median, "ctx_tokens_mean": tok_mean,
+            "hyde_fired_pct": round(hyde_n / n * 100, 1),
+            "latency_loaded_p50_ms": round(_pct(ld, 0.5)), "latency_loaded_p95_ms": round(_pct(ld, 0.95)),
+            "latency_clean_p50_ms": round(_pct(clean, 0.5)) if clean else None,
+            "latency_clean_p95_ms": round(_pct(clean, 0.95)) if clean else None,
+        }
+        Path(args.metrics_out).write_text(json.dumps(metrics, indent=2))
+        print(f"\nwrote metrics -> {args.metrics_out}")
 
     print(f"\nwrote {out_path}\nNow grade with the official judge:\n"
           f"  python src/evaluation/evaluate_qa.py gpt-4o {out_path} {args.dataset}")
