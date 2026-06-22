@@ -377,8 +377,8 @@ async def main() -> int:
     p.add_argument("--measure-latency", action="store_true",
                    help="after all ingestion, re-search every question one-at-a-time on the "
                         "now-quiesced server to report CLEAN serving latency (the in-run "
-                        "search time is measured under concurrent-ingest load and is not "
-                        "comparable to how Zep/mem0 report search latency)")
+                        "search time is measured under concurrent-ingest load, which inflates "
+                        "it, so it is reported separately)")
     p.add_argument("--metrics-out", default="",
                    help="write the latency/token/recall/HyDE metrics summary as JSON here")
     args = p.parse_args()
@@ -489,15 +489,15 @@ async def main() -> int:
     print(f"\nHyDE fallback fired on {hyde_n}/{len(results)} "
           f"({hyde_n / len(results) * 100:.1f}%) queries" if results else "")
 
-    # In-run search latency is measured UNDER concurrent-ingest load — reported
-    # but NOT comparable to how Zep/mem0 publish search latency.
+    # In-run search latency is measured UNDER concurrent-ingest load, which
+    # inflates it — reported separately from the clean number below.
     ld = sorted(r.get("search_ms_loaded", 0.0) for r in results)
     print(f"\nIn-run search latency UNDER LOAD (concurrent ingest — not comparable): "
           f"p50 {_pct(ld, 0.5):.0f}ms  p95 {_pct(ld, 0.95):.0f}ms")
 
     # Clean serving latency: re-search every question one-at-a-time on the now-
-    # quiesced server (no concurrent ingest) — the true single-query latency,
-    # comparable to Zep/mem0. Namespaces persist after the run.
+    # quiesced server (no concurrent ingest) — the true single-query serving
+    # latency. Namespaces persist after the run.
     clean: list[float] = []
     if args.measure_latency and results:
         print(f"\nmeasuring CLEAN serving latency over {len(results)} quiesced searches...", flush=True)

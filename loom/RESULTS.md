@@ -30,13 +30,12 @@ Full-500, identical Loom retrieval, varying only the answerer and grader:
   identical; the answerer is the lever.
 - **Judge effect:** gpt-5 judge is **stricter** (~3–5pt lower), almost entirely on the
   open-ended single-session-preference rubric.
-- **Matched instrument** (gpt-5 reader + gpt-5 judge, what memory platforms publish under):
-  **88.2%** (independently reproduced at 88.4% on a second full-500 run).
+- **gpt-5 reader + gpt-5 judge:** **88.2%** (independently reproduced at 88.4% on a second
+  full-500 run). This is the headline.
 - **Judge adjudication:** a blind 3-rater re-grade of the 23 questions where the gpt-4o and
   gpt-5 judges disagreed found **18 were gpt-5 over-strictness** (mostly the preference
-  rubric) and **5 genuine errors** — implying honestly-graded accuracy nearer **~92%**. That
-  is only usable as a cross-system claim if the other systems' answers are re-adjudicated
-  the same way, which has not been done; the matched number stays **88.2%**.
+  rubric) and **5 genuine errors** — implying honestly-graded accuracy nearer **~92%** once
+  the over-strictness is removed. The headline reported here stays the un-adjudicated **88.2%**.
 
 ### Per-category (gpt-5 reader + gpt-5 judge)
 
@@ -103,18 +102,16 @@ high-recall workload there is little to rescue, so it is mostly latency; it is l
 
 ## How to read these numbers
 
-- **Accuracy is reader/judge-dominated, not retrieval-dominated** (recall@200 = 99.6%).
+- **Accuracy is reader/judge-dominated, not retrieval-dominated** (recall@200 = 99.6%): the
+  facts are in the retrieved context; the score is what the reader and judge make of them.
 - **Latency and token figures are Loom's own operational measurements on this hardware.**
-  They are **not** comparable to other systems' published latency/token numbers (different
-  harness, hardware, read path, tokenizer) — no cross-system latency/token ranking is claimed.
-- Other systems' published *accuracy*: mem0 91 (OSS) / 94.4 (managed), Zep 90.2 (blog) /
-  71.2 (reproducible paper). On the matched gpt-5 reader+judge instrument Loom is 88.2% —
-  ~3pt under mem0's open-source number.
+  They are setup-specific (harness, hardware, read path, and tokenizer all affect them), so
+  treat them as Loom-vs-Loom (e.g. the budget comparison above), not as a portable ranking.
 
 ## Reproduce
 
 ```bash
-# Accuracy (matched instrument) + retrieval metrics:
+# Accuracy (gpt-5 reader + gpt-5 judge) + retrieval metrics:
 python loom/run_loom.py --base-url http://127.0.0.1:7777 \
   --dataset data/longmemeval_s_cleaned.json \
   --out loom/hyp.jsonl --metrics-out loom/metrics.json \
