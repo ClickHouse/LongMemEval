@@ -36,6 +36,9 @@ Full-500, identical Loom retrieval, varying only the answerer and grader:
   gpt-5 judges disagreed found **18 were gpt-5 over-strictness** (mostly the preference
   rubric) and **5 genuine errors** — implying honestly-graded accuracy nearer **~92%** once
   the over-strictness is removed. The headline reported here stays the un-adjudicated **88.2%**.
+- **LLM-free read path confirm (full-500, gpt-5 reader):** with the read-path LLM legs
+  default-off (see §3/§5), accuracy is **87.2% (gpt-5 judge) / 91.2% (gpt-4o judge)** —
+  within ~1pt of the matrix, confirming the LLM-free read path holds accuracy.
 
 ### Per-category (gpt-5 reader + gpt-5 judge)
 
@@ -60,23 +63,28 @@ Recall@200 is 99.6% — Loom surfaces a memory from the gold evidence session on
 question. This is *why* accuracy is reader/judge-dominated: the facts are in the context; the
 score is what the reader makes of them.
 
-## 3. Latency — by retrieval budget
+## 3. Latency — read path is LLM-free by default
 
-Loom's default retrieval runs LLM-in-loop work on the read path (query planning, plus a HyDE
-recall-rescue on a weak top hit). Paired A/B — one ingest, the same 99 questions, gpt-5
-reader+judge, only the retrieval budget differs:
+Loom's read path is now **LLM-free by default** (query planning + HyDE + query-rewrite all
+default-off — see §5). `memory.search` wall-clock, measured over the **full-500** run on
+real question-form queries (each search includes the remote `text-embedding-3-small` query
+embedding + the ClickHouse query; no read-path LLM):
 
-| retrieval budget | accuracy | fact recall | search p50 | search p95 |
-|---|---|---|---|---|
-| default (LLM-in-loop) | 88.9% | 47/99 | ~1,000 ms | ~5,200 ms |
-| **`fast`** (pure vector) | **90.9%** | 47/99 | **~140 ms** | ~620 ms |
+| read path | search p50 | search p95 |
+|---|---|---|
+| LLM-in-loop (prior default, full-500 instrumented) | ~1,920 ms | ~5,740 ms |
+| **LLM-free (current default, full-500 clean)** | **~680 ms** | **~1,880 ms** |
 
-The `fast` budget **holds accuracy** (within n=99 noise) and **recall** (identical — differs
-on 0 questions) at **~7× lower latency**. On this workload (recall already 99.6%) the
-LLM-in-loop work does not change *what* is retrieved, so it is latency without benefit —
-`--retrieval-budget fast` is the latency-optimal setting for QA workloads. (Floor for a
-simple well-matched query is ~290 ms; the default path's p50 ranges ~1.0–1.9s depending on
-query mix and load.)
+Removing the read-path LLM legs cuts p50 ~2.8× (≈1,920 → 680 ms) at equal accuracy (§1). On
+this workload (recall already 99.6%) the LLM-in-loop work does not change *what* is retrieved,
+so it is latency without benefit. The ~680 ms p50 is dominated by the **remote embedding
+round-trip + the CH query**, not Loom compute (a co-located/local embedder removes the embed
+RTT; warm floor ~130 ms on short queries). The LLM legs stay available via
+`--retrieval-budget deep` for paraphrase-heavy / sparse-memory workloads.
+
+A smaller paired A/B (n=99, gpt-5 reader+judge) agreed in direction — `fast` budget held
+accuracy (90.9% vs 88.9%) and recall (differs on 0 questions) — but its ~140 ms p50 was a
+short-query lower bound, not the full-500 serving figure above.
 
 ## 4. Token efficiency — by top_k
 
@@ -86,7 +94,7 @@ Context handed to the reader (median, ~4 chars/token), measured on a populated n
 |---|---|---|
 | 20 | 20 | ~1,927 |
 | 50 | ~48 | ~4,177 |
-| 200 | ~119–188 | ~11,290 |
+| 200 | ~120–190 | ~11,500 |
 
 Token cost is a **recall/cost knob**: the 88–92% accuracy above uses `top_k=200`. Smaller `k`
 serves far less context but lowers recall and accuracy — the low token count and the high
@@ -97,8 +105,10 @@ accuracy do not co-exist at the same `k`.
 The HyDE recall-rescue (an LLM that rewrites a weak query to an answer-shape and re-searches)
 **fired on ~10% of queries** and, in a 60-question A/B, **changed which answer was retrieved on
 0 of them** — it fires partly on abstention/preference questions it cannot help. On a
-high-recall workload there is little to rescue, so it is mostly latency; it is left enabled
-(a knob, not removed) because it can help paraphrase-heavy or sparse-memory workloads.
+high-recall workload there is little to rescue, so it is mostly latency. It is now
+**default-off** (along with the other two read-path LLM legs — §3), remaining available as an
+opt-in knob (`--retrieval-budget deep`) for paraphrase-heavy or sparse-memory workloads.
+The full-500 runs above report `hyde_fired_pct = 0.0` (LLM-free default).
 
 ## How to read these numbers
 
