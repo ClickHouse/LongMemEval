@@ -93,21 +93,28 @@ def _iso(longmemeval_date: str) -> str:
 
 async def _post(client: httpx.AsyncClient, url: str, body: dict, token: str,
                 *, retries: int = 3) -> dict:
-    """POST with retry-on-5xx + backoff. A dropped index/search would silently
-    corrupt recall, so transient ClickHouse write contention must be ridden out."""
+    """POST with retry + backoff on transient failures: network/timeout errors,
+    429, and 5xx. A dropped index/search would silently corrupt recall, so
+    transient network blips and ClickHouse write contention must be ridden out.
+    A non-429 4xx (a genuine client error) raises immediately, not retried."""
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    last: httpx.Response | None = None
     for attempt in range(retries):
-        r = await client.post(url, json=body, headers=headers, timeout=120.0)
-        if r.status_code < 500:
+        last_attempt = attempt == retries - 1
+        try:
+            r = await client.post(url, json=body, headers=headers, timeout=120.0)
+        except httpx.RequestError:  # network / timeout — transient, retry
+            if last_attempt:
+                raise
+            await asyncio.sleep(0.5 * (2 ** attempt))
+            continue
+        if r.status_code != 429 and r.status_code < 500:
             r.raise_for_status()
             return r.json()
-        last = r
+        if last_attempt:
+            r.raise_for_status()
         await asyncio.sleep(0.5 * (2 ** attempt))
-    assert last is not None
-    last.raise_for_status()
     raise RuntimeError("unreachable")
 
 
@@ -205,13 +212,13 @@ async def _answer(client: httpx.AsyncClient, question: str, hits: list[dict],
     # for models that support it, so gpt-4o behavior stays byte-identical.
     if not re.match(r"^(gpt-5|o[1-9])", model):
         body["temperature"] = 0.0
-    r = await client.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json=body, timeout=60.0,
+    # Route through _post so the reader call inherits the same retry/backoff as
+    # the Loom calls — a transient 429/5xx/network error otherwise drops a whole
+    # question and skews the metric.
+    data = await _post(
+        client, "https://api.openai.com/v1/chat/completions", body, api_key
     )
-    r.raise_for_status()
-    return (r.json()["choices"][0]["message"]["content"] or "").strip()
+    return (data["choices"][0]["message"]["content"] or "").strip()
 
 
 async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: dict,

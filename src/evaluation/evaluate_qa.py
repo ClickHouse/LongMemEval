@@ -101,14 +101,19 @@ if __name__ == '__main__':
     else:
         client = OpenAI(api_key='EMPTY', base_url='http://localhost:8001/v1')
 
-    try:
-        hypotheses = [json.loads(line) for line in open(args.hyp_file).readlines()]
-    except json.JSONDecodeError:
-        hypotheses = json.load(open(args.hyp_file))
-    try:
-        references = json.load(open(args.ref_file))
-    except json.JSONDecodeError:
-        references = [json.loads(line) for line in open(args.ref_file).readlines()]
+    def _load_records(path):
+        """A LongMemEval file is either a JSON array or one JSON object per
+        line. Read it fully (closing the handle), then parse whichever shape it
+        is; blank lines are skipped."""
+        with open(path) as f:
+            text = f.read()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return [json.loads(ln) for ln in text.splitlines() if ln.strip()]
+
+    hypotheses = _load_records(args.hyp_file)
+    references = _load_records(args.ref_file)
     qid2qdata = {e['question_id']: e for e in references}
     qid2qtype = {e['question_id']: e['question_type'] for e in references}
 
@@ -131,6 +136,10 @@ if __name__ == '__main__':
             qtype2acc[qtype].append(1 if label else 0)
             overall.append(1 if label else 0)
 
+    if not overall:
+        sys.exit('No hypotheses were evaluated: every entry was skipped (check '
+                 'that the hypothesis question_ids match the reference file). '
+                 'Refusing to report nan.')
     print('Accuracy:', round(float(np.mean(overall)), 4))
     for k, v in sorted(qtype2acc.items()):
         if v:
