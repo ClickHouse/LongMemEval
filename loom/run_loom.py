@@ -208,10 +208,16 @@ async def _answer(client: httpx.AsyncClient, question: str, hits: list[dict],
             computed=_derived_block(derived),
         )}],
     }
-    # Reasoning models (gpt-5, o-series) reject temperature != 1; only set it
-    # for models that support it, so gpt-4o behavior stays byte-identical.
+    # Reasoning models (gpt-5, o-series) reject temperature != 1 and use
+    # max_completion_tokens (not max_tokens) — and a small cap truncates their
+    # hidden reasoning. For non-reasoning models, match the official reader
+    # (run_generation.py: max_tokens = gen_length = 800 for the CoT prompt) so
+    # reader output length/cost/format don't drift from the official harness.
+    # Reasoning models are left uncapped: the official harness predates them,
+    # so there is no official cap to match.
     if not re.match(r"^(gpt-5|o[1-9])", model):
         body["temperature"] = 0.0
+        body["max_tokens"] = 800
     # Route through _post so the reader call inherits the same retry/backoff as
     # the Loom calls — a transient 429/5xx/network error otherwise drops a whole
     # question and skews the metric.

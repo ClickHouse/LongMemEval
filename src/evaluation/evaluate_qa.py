@@ -96,8 +96,11 @@ if __name__ == '__main__':
         sys.exit(1)
     metric_model, source = model_zoo[args.metric_model]
     if source == 'openai':
-        openai.organization = os.getenv('OPENAI_ORGANIZATION')
-        client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+        # Pass organization into the v1 client constructor; a module-level
+        # openai.organization is not consulted by an explicit OpenAI(...), so
+        # org-scoped keys would otherwise be ignored.
+        client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'),
+                        organization=os.getenv('OPENAI_ORGANIZATION'))
     else:
         client = OpenAI(api_key='EMPTY', base_url='http://localhost:8001/v1')
 
