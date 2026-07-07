@@ -135,6 +135,14 @@ async def _post(client: httpx.AsyncClient, url: str, body: dict, token: str,
     raise RuntimeError("unreachable")
 
 
+def _pct(xs: list, q: float):
+    """Nearest-rank percentile on a 0-based sorted list. int(len*q)
+    over-selects the upper tail (p95 -> the max at n=20); indexing off
+    (len-1) maps q in [0,1] cleanly to min..max. Module-level so it's
+    unit-testable — it drives the reported p50/p95 latency + token metrics."""
+    return xs[round((len(xs) - 1) * q)] if xs else 0
+
+
 def _history_block(hits: list[dict], key_to_date: dict | None = None) -> str:
     """Render retrieved memories as dated blocks, oldest first (mirrors the
     official run_generation.py per-session formatting)."""
@@ -512,12 +520,6 @@ async def main() -> int:
     ftot = [r.get("fact_in_context", False) for r in results]
     print(f"  {'OVERALL':28} {sum(ftot)}/{len(ftot)} "
           f"({sum(ftot) / len(ftot) * 100:.1f}%)" if ftot else "  (no results)")
-
-    def _pct(xs: list, q: float):
-        # Nearest-rank on a 0-based sorted list: int(len*q) over-selects the
-        # upper tail (p95 -> max at n=20). Index off (len-1) so q in [0,1] maps
-        # cleanly min..max.
-        return xs[round((len(xs) - 1) * q)] if xs else 0
 
     # Token efficiency: the size of the context Loom hands the reader per query.
     toks = sorted(r.get("ctx_tokens", 0) for r in results)
