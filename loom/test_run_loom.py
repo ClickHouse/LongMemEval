@@ -137,6 +137,14 @@ def test_post_exhausts_retries_and_raises_on_persistent_5xx():
     assert c.calls == 3
 
 
+def test_post_rejects_retries_below_one():
+    # retries=0 would otherwise skip the loop and hit RuntimeError("unreachable").
+    c = _Client([_Resp(200, {"ok": 1})])
+    with pytest.raises(ValueError):
+        _call_post(c, retries=0)
+    assert c.calls == 0
+
+
 # --------------------------------------------------------------------------
 # _answer — must replicate the official reader settings for non-reasoning
 # models (temperature=0, max_tokens=800) and leave reasoning models uncapped,

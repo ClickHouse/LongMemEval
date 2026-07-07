@@ -123,10 +123,12 @@ if __name__ == '__main__':
     qtype2acc = {t: [] for t in set(qid2qtype.values())}
     overall = []
     result_file = '{}.eval-results-{}'.format(args.hyp_file, args.metric_model)
+    skipped = []
     with open(result_file, 'w') as out_f:
         for entry in tqdm(hypotheses):
             qid = entry['question_id']
             if qid not in qid2qtype:
+                skipped.append(qid)  # not in the reference — surfaced below
                 continue
             qtype = qid2qtype[qid]
             prompt = get_anscheck_prompt(
@@ -139,6 +141,10 @@ if __name__ == '__main__':
             qtype2acc[qtype].append(1 if label else 0)
             overall.append(1 if label else 0)
 
+    if skipped:
+        print('WARNING: {} hypothesis question_id(s) not in the reference file; '
+              'skipped (not scored) — check the hyp/ref files match. e.g. {}'
+              .format(len(skipped), skipped[:5]), file=sys.stderr)
     if not overall:
         sys.exit('No hypotheses were evaluated: every entry was skipped (check '
                  'that the hypothesis question_ids match the reference file). '

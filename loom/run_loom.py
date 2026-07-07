@@ -97,6 +97,8 @@ async def _post(client: httpx.AsyncClient, url: str, body: dict, token: str,
     429, and 5xx. A dropped index/search would silently corrupt recall, so
     transient network blips and ClickHouse write contention must be ridden out.
     A non-429 4xx (a genuine client error) raises immediately, not retried."""
+    if retries < 1:
+        raise ValueError(f"retries must be >= 1, got {retries}")
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
