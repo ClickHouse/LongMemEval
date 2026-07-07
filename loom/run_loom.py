@@ -109,9 +109,19 @@ async def _post(client: httpx.AsyncClient, url: str, body: dict, token: str,
                 raise
             await asyncio.sleep(0.5 * (2 ** attempt))
             continue
-        if r.status_code != 429 and r.status_code < 500:
-            r.raise_for_status()
+        if 200 <= r.status_code < 300:
             return r.json()
+        if 300 <= r.status_code < 400:
+            # follow_redirects is off for POST, so a redirect (http->https,
+            # proxy, trailing slash) would otherwise slip past raise_for_status
+            # (which ignores 3xx) and blow up in r.json() on the redirect body.
+            raise RuntimeError(
+                f"{url} returned {r.status_code} redirect to "
+                f"{r.headers.get('location', '?')}; point --base-url at the "
+                f"final URL (redirects are not followed on POST)."
+            )
+        if r.status_code != 429 and r.status_code < 500:
+            r.raise_for_status()  # non-429 4xx: genuine client error, don't retry
         if last_attempt:
             r.raise_for_status()
         await asyncio.sleep(0.5 * (2 ** attempt))
@@ -438,6 +448,16 @@ async def main() -> int:
                       f"[{r['question_type']}]", flush=True)
             except (httpx.HTTPError, KeyError) as e:
                 print(f"  ! {item.get('question_id', '?')} ERROR: {e}", file=sys.stderr, flush=True)
+                # Record a placeholder so a harness failure still counts in the
+                # denominator (empty hypothesis -> judged wrong) rather than
+                # silently dropping the question and inflating QA accuracy/recall.
+                results.append({
+                    "question_id": item.get("question_id", ""),
+                    "question_type": item.get("question_type", "unknown"),
+                    "hypothesis": "",
+                    "recalled": False,
+                    "all_covered": False,
+                })
 
         await asyncio.gather(*(runner(it) for it in dataset))
 
