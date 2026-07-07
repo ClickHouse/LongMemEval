@@ -100,6 +100,13 @@ async def _post(client: httpx.AsyncClient, url: str, body: dict, token: str,
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    # Forward the org on OpenAI calls (the reader) so it matches the judge,
+    # which passes organization to its client; the README supports
+    # OPENAI_ORGANIZATION for org-scoped keys. Gated on the OpenAI host so Loom
+    # calls are untouched.
+    _org = os.environ.get("OPENAI_ORGANIZATION")
+    if _org and "api.openai.com" in url:
+        headers["OpenAI-Organization"] = _org
     for attempt in range(retries):
         last_attempt = attempt == retries - 1
         try:
@@ -507,7 +514,10 @@ async def main() -> int:
           f"({sum(ftot) / len(ftot) * 100:.1f}%)" if ftot else "  (no results)")
 
     def _pct(xs: list, q: float):
-        return xs[min(len(xs) - 1, int(len(xs) * q))] if xs else 0
+        # Nearest-rank on a 0-based sorted list: int(len*q) over-selects the
+        # upper tail (p95 -> max at n=20). Index off (len-1) so q in [0,1] maps
+        # cleanly min..max.
+        return xs[round((len(xs) - 1) * q)] if xs else 0
 
     # Token efficiency: the size of the context Loom hands the reader per query.
     toks = sorted(r.get("ctx_tokens", 0) for r in results)
