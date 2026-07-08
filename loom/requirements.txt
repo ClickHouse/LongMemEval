@@ -1,3 +1,7 @@
 # Extra dependency for the Loom adapter (loom/run_loom.py).
 # The official reader/judge deps are already in the repo's requirements.
 httpx>=0.27
+
+# Test-only — the offline unit tests (loom/test_run_loom.py) need pytest.
+# Not required to run the adapter; install explicitly:  pip install pytest
+

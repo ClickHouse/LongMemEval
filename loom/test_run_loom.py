@@ -3,8 +3,10 @@ logic — the parts that, if wrong, make the benchmark report *wrong numbers
 confidently*: percentile reporting, transient-failure retry/status handling,
 official reader-parity gating, and history rendering.
 
-No network: httpx is mocked. Run from the repo root:
+No network: httpx is mocked. pytest is test-only (not an adapter dependency).
+Run from the repo root:
 
+    pip install pytest
     python -m pytest loom/test_run_loom.py -q
 
 These lock the behaviors fixed in the PR-review passes (retry on 5xx/429/

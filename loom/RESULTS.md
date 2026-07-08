@@ -9,7 +9,11 @@ latency, token efficiency, and the HyDE fallback rate.
 
 ## Setup
 
-- **Dataset:** LongMemEval-S, 500 questions (491 answered; a few dropped to reader API timeouts).
+- **Dataset:** LongMemEval-S, 500 questions; **491 scored**. The other ~9 hit
+  reader-API timeouts (after retries) and were **excluded from this run's
+  denominator**. The harness now records a placeholder empty answer on such
+  failures — scored **incorrect**, not dropped — so later runs keep the full
+  500 denominator; this ~9-question exclusion is specific to this earlier run.
 - **Indexing + retrieval:** Loom — `memory.set_from_messages` per session, then
   `memory.search` at `top_k=200`, `search_mode=rrf`, no reranker (product default).
 - **Embeddings:** OpenAI `text-embedding-3-small`. **Extraction:** `gpt-4o-mini`.
