@@ -545,11 +545,15 @@ async def main() -> int:
     # Clean serving latency: re-search every question one-at-a-time on the now-
     # quiesced server (no concurrent ingest) — the true single-query serving
     # latency. Namespaces persist after the run.
+    # Failed-question placeholders remain in accuracy/recall denominators but
+    # have no retrieval identity to re-search for latency.
+    latency_results = [r for r in results if r.get("ns") and r.get("query")]
     clean: list[float] = []
-    if args.measure_latency and results:
-        print(f"\nmeasuring CLEAN serving latency over {len(results)} quiesced searches...", flush=True)
+    clean_attempted = 0
+    if args.measure_latency and latency_results:
+        print(f"\nmeasuring CLEAN serving latency over {len(latency_results)} eligible quiesced searches...", flush=True)
         async with httpx.AsyncClient(timeout=120.0) as lc:
-            for r in results:
+            for r in latency_results:
                 sb = {"org": "dev", "namespace": r["ns"], "agent": "lme-loom", "user_id": "-",
                       "query": r["query"], "top_k": args.top_k, "search_mode": args.search_mode,
                       "alpha": 0.5, "include_top_n_unmatched": 120}
@@ -557,6 +561,7 @@ async def main() -> int:
                     sb["observation_date"] = r["q_iso"]
                 if args.retrieval_budget:  # measure the same path the run used
                     sb["retrieval_budget"] = args.retrieval_budget
+                clean_attempted += 1
                 t0 = time.perf_counter()
                 try:
                     await _post(lc, args.base_url + "/v1/memory.search", sb, args.token)
@@ -567,6 +572,11 @@ async def main() -> int:
         if clean:
             print(f"CLEAN serving latency (quiesced, 1 query at a time): "
                   f"p50 {_pct(clean, 0.5):.0f}ms  p95 {_pct(clean, 0.95):.0f}ms  min {clean[0]:.0f}ms")
+    if args.measure_latency:
+        print(f"CLEAN serving latency counts: eligible {len(latency_results)}, "
+              f"attempted {clean_attempted}, measured {len(clean)}, "
+              f"skipped (no retrieval identity) {len(results) - len(latency_results)}, "
+              f"failed {clean_attempted - len(clean)}")
 
     if args.metrics_out and results:
         n = len(results)
@@ -580,6 +590,11 @@ async def main() -> int:
             "latency_loaded_p50_ms": round(_pct(ld, 0.5)), "latency_loaded_p95_ms": round(_pct(ld, 0.95)),
             "latency_clean_p50_ms": round(_pct(clean, 0.5)) if clean else None,
             "latency_clean_p95_ms": round(_pct(clean, 0.95)) if clean else None,
+            "latency_clean_eligible_n": len(latency_results) if args.measure_latency else None,
+            "latency_clean_attempted_n": clean_attempted if args.measure_latency else None,
+            "latency_clean_measured_n": len(clean) if args.measure_latency else None,
+            "latency_clean_skipped_n": n - len(latency_results) if args.measure_latency else None,
+            "latency_clean_failed_n": clean_attempted - len(clean) if args.measure_latency else None,
         }
         Path(args.metrics_out).write_text(json.dumps(metrics, indent=2))
         print(f"\nwrote metrics -> {args.metrics_out}")

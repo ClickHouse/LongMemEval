@@ -197,3 +197,98 @@ def test_history_block_epoch_sentinel_is_undated():
 
 def test_history_block_empty_is_placeholder():
     assert R._history_block([]) == "(no facts retrieved)"
+
+
+@pytest.mark.parametrize(
+    "failed_ids, latency_error",
+    [({"q-failed"}, False), ({"q-ok", "q-failed"}, False), ({"q-failed"}, True)],
+    ids=["mixed-question-failure", "all-questions-failed", "latency-search-failed"],
+)
+def test_main_latency_preserves_failed_questions(
+    tmp_path, monkeypatch, capsys, failed_ids, latency_error
+):
+    import json
+
+    dataset = tmp_path / "dataset.json"
+    hypotheses = tmp_path / "hypotheses.jsonl"
+    metrics_file = tmp_path / "metrics.json"
+    dataset.write_text(json.dumps([
+        {"question_id": qid, "question_type": "single-session-user"}
+        for qid in ("q-ok", "q-failed")
+    ]))
+    monkeypatch.setenv("OPENAI_API_KEY", "offline-test-key")
+    monkeypatch.setenv("LOOM_TOKEN", "offline-test-token")
+    monkeypatch.setattr(sys, "argv", [
+        "run_loom.py", "--dataset", str(dataset), "--out", str(hypotheses),
+        "--metrics-out", str(metrics_file), "--base-url", "http://offline.invalid",
+        "--retrieval-budget", "fast", "--measure-latency",
+    ])
+
+    class OfflineClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url, **kwargs):
+            assert url == "http://offline.invalid/v1/health"
+            return _Resp(200)
+
+    async def run_item(client, base_url, token, item, **kwargs):
+        qid = item["question_id"]
+        if qid in failed_ids:
+            raise httpx.ConnectError("offline question failure")
+        return {
+            "question_id": qid, "question_type": item["question_type"],
+            "hypothesis": "answer", "recalled": True, "all_covered": True,
+            "fact_in_context": True, "ns": "offline-namespace", "query": "question?",
+            "q_iso": "2023-01-01",
+        }
+
+    searches = []
+
+    async def search(client, url, body, token, **kwargs):
+        assert url == "http://offline.invalid/v1/memory.search"
+        assert token == "offline-test-token"
+        searches.append(body)
+        if latency_error:
+            raise httpx.ConnectError("offline latency failure")
+        return {}
+
+    monkeypatch.setattr(R.httpx, "AsyncClient", OfflineClient)
+    monkeypatch.setattr(R, "_run_item", run_item)
+    monkeypatch.setattr(R, "_post", search)
+    monkeypatch.setattr(R.time, "perf_counter", lambda: 1.0)
+
+    assert asyncio.run(R.main()) == 0
+    rows = [json.loads(line) for line in hypotheses.read_text().splitlines()]
+    assert len(rows) == 2
+    assert {r["question_id"]: r["hypothesis"] for r in rows} == {
+        qid: "" if qid in failed_ids else "answer" for qid in ("q-ok", "q-failed")
+    }
+    eligible = 2 - len(failed_ids)
+    measured = eligible if not latency_error else 0
+    metrics = json.loads(metrics_file.read_text())
+    assert metrics["n_questions"] == 2
+    for key in ("recall_session_pct", "recall_allsession_pct", "recall_fact_pct"):
+        assert metrics[key] == eligible / 2 * 100
+    assert metrics["latency_clean_eligible_n"] == eligible
+    assert metrics["latency_clean_attempted_n"] == eligible
+    assert metrics["latency_clean_measured_n"] == measured
+    assert metrics["latency_clean_skipped_n"] == len(failed_ids)
+    assert metrics["latency_clean_failed_n"] == eligible - measured
+    assert metrics["latency_clean_p50_ms"] == (0 if measured else None)
+    assert metrics["latency_clean_p95_ms"] == (0 if measured else None)
+    assert searches == ([{
+        "org": "dev", "namespace": "offline-namespace", "agent": "lme-loom",
+        "user_id": "-", "query": "question?", "top_k": 30, "search_mode": "rrf",
+        "alpha": 0.5, "include_top_n_unmatched": 120,
+        "observation_date": "2023-01-01", "retrieval_budget": "fast",
+    }] if eligible else [])
+    output = capsys.readouterr()
+    assert "offline question failure" in output.err
+    assert "CLEAN serving latency counts:" in output.out
