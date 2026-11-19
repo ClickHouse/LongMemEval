@@ -4,26 +4,28 @@ Loom (https://github.com/ClickHouse/loom) is a ClickHouse-backed memory service
 exposing an HTTP API (`memory.set_from_messages` to index, `memory.search` to
 retrieve). The official LongMemEval retrieval script (`src/retrieval/run_retrieval.py`)
 is built around in-process retrievers (BM25 / Contriever / Stella / GTE) over a
-flat corpus, so it cannot drive an external memory *service*. This adapter plugs
-Loom in at the INDEXING + RETRIEVAL stages; the downstream READER and JUDGE stay
-the official ones:
+flat corpus. This adapter supplies a separate path for an external memory
+service, with an adapted reader prompt and a modified judge:
 
   indexing + retrieval : Loom  (this script)
-  reading              : the official run_generation.py prompt (replicated here,
-                         "facts extracted from history chats" + step-by-step)
-  judging              : the official src/evaluation/evaluate_qa.py (run separately
+  reading              : adapted from the run_generation.py facts/CoT template
+  judging              : modified src/evaluation/evaluate_qa.py (run separately
                          on the hypotheses file this script writes)
+
+The reader adds temporal precedence, counting/coreference, date arithmetic and
+optional server-computed aggregate guidance. The judge uses rephrased prompts
+and modified client/reporting code. These are not unchanged benchmark stages.
 
 Pipeline, per question:
   1. Create a fresh Loom namespace.
   2. Ingest every haystack session via memory.set_from_messages (one call per
      session, run concurrently), forwarding the session date as observation_date.
   3. memory.search the question -> top-k memories.
-  4. Generate an answer from those memories with the official reader prompt.
+  4. Generate an answer from those memories with the adapted reader prompt.
   5. Record the answer (hypothesis) + evidence-session recall@k.
 
 Outputs a hypotheses JSONL ({"question_id", "hypothesis"}) to grade with the
-official judge:
+modified judge:
 
     python loom/run_loom.py --base-url http://127.0.0.1:7777 --token "$LOOM_TOKEN" \
         --dataset data/longmemeval_s_cleaned.json --out loom/loom_hyp.jsonl
@@ -52,10 +54,10 @@ import httpx
 
 _HAYSTACK_DATE = re.compile(r"^(\d{4})/(\d{2})/(\d{2})")
 
-# The official reader prompt for a fact-retrieval system, replicated verbatim
-# from src/generation/run_generation.py (the "facts extracted from history
-# chats" variant with step-by-step reasoning, cot=True). A single user message,
-# no system prompt; the full completion is the hypothesis the judge grades.
+# Adapted from the official facts/CoT template in src/generation/run_generation.py,
+# with temporal precedence, counting/coreference, date arithmetic and optional
+# server-computed aggregate guidance. A single user message, no system prompt;
+# the full completion is the hypothesis the modified judge grades.
 _ANSWER_PROMPT = (
     "I will give you several facts extracted from history chats between you "
     "and a user. Please answer the question based on the relevant facts. "
@@ -237,9 +239,9 @@ async def _answer(client: httpx.AsyncClient, question: str, hits: list[dict],
     }
     # Reasoning models (gpt-5, o-series) reject temperature != 1 and use
     # max_completion_tokens (not max_tokens) — and a small cap truncates their
-    # hidden reasoning. For non-reasoning models, match the official reader
-    # (run_generation.py: max_tokens = gen_length = 800 for the CoT prompt) so
-    # reader output length/cost/format don't drift from the official harness.
+    # hidden reasoning. Non-reasoning temperature/output-cap settings match
+    # run_generation.py (max_tokens = gen_length = 800 for the CoT prompt).
+    # The reader prompt is adapted above; full reader parity is not claimed.
     # Reasoning models are left uncapped: the official harness predates them,
     # so there is no official cap to match.
     if not re.match(r"^(gpt-5|o[1-9])", model):
@@ -358,7 +360,7 @@ async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: 
             for h in hits[:top_k]
         )
 
-        # 4) Read: generate an answer with the official reader prompt.
+        # 4) Read: generate an answer with the adapted reader prompt.
         # memory_key -> source-session date (earliest), for the date-fallback.
         key_to_date = {
             k: min((sid_to_date[s] for s in ss if s in sid_to_date), default="")
@@ -599,7 +601,7 @@ async def main() -> int:
         Path(args.metrics_out).write_text(json.dumps(metrics, indent=2))
         print(f"\nwrote metrics -> {args.metrics_out}")
 
-    print(f"\nwrote {out_path}\nNow grade with the official judge:\n"
+    print(f"\nwrote {out_path}\nNow grade with the modified judge:\n"
           f"  python src/evaluation/evaluate_qa.py gpt-4o {out_path} {args.dataset}")
     return 0
 

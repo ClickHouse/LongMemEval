@@ -1,7 +1,6 @@
 """Offline unit tests for the Loom LongMemEval adapter's correctness-critical
-logic — the parts that, if wrong, make the benchmark report *wrong numbers
-confidently*: percentile reporting, transient-failure retry/status handling,
-official reader-parity gating, and history rendering.
+logic: percentile reporting, transient-failure retry/status handling,
+reader temperature/output-cap handling, and history rendering.
 
 No network: httpx is mocked. pytest is test-only (not an adapter dependency).
 Run from the repo root:
@@ -148,7 +147,7 @@ def test_post_rejects_retries_below_one():
 
 
 # --------------------------------------------------------------------------
-# _answer — must replicate the official reader settings for non-reasoning
+# _answer — must match the official temperature/output cap for non-reasoning
 # models (temperature=0, max_tokens=800) and leave reasoning models uncapped,
 # or results drift from the official harness.
 # --------------------------------------------------------------------------
@@ -292,3 +291,4 @@ def test_main_latency_preserves_failed_questions(
     output = capsys.readouterr()
     assert "offline question failure" in output.err
     assert "CLEAN serving latency counts:" in output.out
+    assert "Now grade with the modified judge:" in output.out
