@@ -89,3 +89,7 @@ python src/evaluation/evaluate_qa.py gpt-4o loom/loom_hyp.jsonl data/longmemeval
 - The optional post-ingestion search pass is sequential; it does not verify
   server-wide quiescence or exclude other clients and workers.
 - The adapter HTTPX range preserves the pinned judge client's initialization API.
+
+The judge loader accepts a one-row hypotheses JSONL file as one record, as well
+as multi-row JSONL and JSON arrays. Nonpositive question concurrency is rejected
+before credentials, dataset loading or a health request.

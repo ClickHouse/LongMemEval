@@ -353,3 +353,79 @@ def test_item_requires_inline_ingestion(monkeypatch, ingest_response, derived):
         assert requests[1][1]["namespace_scope"] == "this"
         assert reads == [True]
     assert requests[0][1]["defer"] is False
+
+
+@pytest.mark.parametrize("concurrency", ["0", "-1"])
+def test_main_rejects_nonpositive_concurrency_before_health(
+    tmp_path, monkeypatch, capsys, concurrency
+):
+    import json
+
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text(json.dumps([{
+        "question_id": "q", "question_type": "single-session-user",
+        "question": "What changed?", "haystack_sessions": [],
+    }]))
+    monkeypatch.setenv("OPENAI_API_KEY", "offline-placeholder")
+    monkeypatch.setattr(sys, "argv", [
+        "run_loom.py", "--dataset", str(dataset), "--concurrency", concurrency,
+    ])
+    health_calls = []
+
+    class OfflineClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, *args, **kwargs):
+            health_calls.append(True)
+            return _Resp(200)
+
+    monkeypatch.setattr(R.httpx, "AsyncClient", OfflineClient)
+
+    async def bounded_run():
+        # Bound the pre-fix semaphore wait without requiring Python 3.11.
+        task = asyncio.current_task()
+        timer = asyncio.get_running_loop().call_later(0.1, task.cancel)
+        try:
+            return await R.main()
+        finally:
+            timer.cancel()
+
+    with pytest.raises(SystemExit) as error:
+        asyncio.run(bounded_run())
+    assert error.value.code == 2
+    assert "--concurrency must be at least 1" in capsys.readouterr().err
+    assert not health_calls
+
+
+@pytest.mark.parametrize("format_name", ["single-jsonl", "multi-jsonl", "array", "blank-lines"])
+def test_modified_judge_loader_preserves_record_list(tmp_path, format_name):
+    # Execute only the exact parser AST, without importing the provider module.
+    import ast
+    import json
+    from pathlib import Path
+
+    judge_file = Path(__file__).resolve().parents[1] / "src/evaluation/evaluate_qa.py"
+    tree = ast.parse(judge_file.read_text())
+    loader = next(node for node in ast.walk(tree)
+                  if isinstance(node, ast.FunctionDef) and node.name == "_load_records")
+    namespace = {"json": json}
+    exec(compile(ast.Module(body=[loader], type_ignores=[]), str(judge_file), "exec"), namespace)
+    rows = [{"question_id": "q1", "hypothesis": "one"}]
+    if format_name == "multi-jsonl":
+        rows.append({"question_id": "q2", "hypothesis": "two"})
+    if format_name == "array":
+        text = json.dumps(rows)
+    else:
+        text = "\n".join(json.dumps(row) for row in rows) + "\n"
+        if format_name == "blank-lines":
+            text = "\n" + text + "\n"
+    fixture = tmp_path / "hypotheses.jsonl"
+    fixture.write_text(text)
+    assert namespace["_load_records"](fixture) == rows

@@ -111,7 +111,8 @@ if __name__ == '__main__':
         with open(path) as f:
             text = f.read()
         try:
-            return json.loads(text)
+            records = json.loads(text)
+            return [records] if isinstance(records, dict) else records
         except json.JSONDecodeError:
             return [json.loads(ln) for ln in text.splitlines() if ln.strip()]
 
