@@ -75,8 +75,9 @@ python src/evaluation/evaluate_qa.py gpt-4o loom/loom_hyp.jsonl data/longmemeval
   concurrently (`--ingest-concurrency`) because each call does LLM extraction
   server-side; a -S question has ~50 sessions.
 - The harness requests inline extraction with `defer: false`. A deferred or
-  queued response stops the run before retrieval; background extraction is not
-  supported by this harness.
+  queued response aborts the run. The affected question does not proceed to
+  retrieval or its reader; other concurrent questions may already have
+  progressed. Background extraction is not supported by this harness.
 - Failed questions remain in QA and recall denominators. Loaded-latency
   percentiles use only recorded samples, with measured/skipped counts and null
   percentiles when no sample exists. They do not count every HTTP attempt.
