@@ -246,6 +246,7 @@ def test_main_latency_preserves_failed_questions(
             "hypothesis": "answer", "recalled": True, "all_covered": True,
             "fact_in_context": True, "ns": "offline-namespace", "query": "question?",
             "q_iso": "2023-01-01",
+            "search_ms_loaded": 120.0,
         }
 
     searches = []
@@ -282,6 +283,10 @@ def test_main_latency_preserves_failed_questions(
     assert metrics["latency_clean_failed_n"] == eligible - measured
     assert metrics["latency_clean_p50_ms"] == (0 if measured else None)
     assert metrics["latency_clean_p95_ms"] == (0 if measured else None)
+    assert metrics["latency_loaded_p50_ms"] == (120 if eligible else None)
+    assert metrics["latency_loaded_p95_ms"] == (120 if eligible else None)
+    assert metrics["latency_loaded_measured_n"] == eligible
+    assert metrics["latency_loaded_skipped_n"] == len(failed_ids)
     assert searches == ([{
         "org": "dev", "namespace": "offline-namespace", "agent": "lme-loom",
         "user_id": "-", "query": "question?", "top_k": 30, "search_mode": "rrf",
@@ -292,3 +297,56 @@ def test_main_latency_preserves_failed_questions(
     assert "offline question failure" in output.err
     assert "CLEAN serving latency counts:" in output.out
     assert "Now grade with the modified judge:" in output.out
+
+
+@pytest.mark.parametrize(
+    "ingest_response, derived",
+    [({"deferred": True, "queue_id": "queued", "written": []}, None),
+     ({"queue_id": "queued", "written": []}, None),
+     ({"written": [{"memory_key": "fact"}]}, None),
+     ({"written": [{"memory_key": "fact"}]}, {"count": 2})],
+    ids=["deferred", "queue-id", "inline", "structured-context"],
+)
+def test_item_requires_inline_ingestion(monkeypatch, ingest_response, derived):
+    requests = []
+    reads = []
+
+    async def post(client, url, body, token):
+        requests.append((url, body))
+        if url.endswith("/v1/memory.set_from_messages"):
+            return ingest_response
+        assert url.endswith("/v1/memory.search")
+        return {"results": [], "derived_aggregate": derived}
+
+    async def answer(*args, **kwargs):
+        assert kwargs["derived"] == derived
+        reads.append(True)
+        return "answer"
+
+    monkeypatch.setattr(R, "_post", post)
+    monkeypatch.setattr(R, "_answer", answer)
+    item = {"question_id": "q", "question": "What changed?",
+            "haystack_sessions": [[{"role": "user", "content": "A fact"}]]}
+
+    def run():
+        return asyncio.run(R._run_item(
+            None, "http://offline.invalid", "offline-token", item,
+            top_k=1, search_mode="rrf", ingest_conc=1,
+            model="offline", api_key="offline-key", retrieval_budget="fast",
+            item_sem=asyncio.Semaphore(1),
+        ))
+
+    if ingest_response.get("deferred") or ingest_response.get("queue_id"):
+        with pytest.raises(RuntimeError, match="Deferred extraction"):
+            run()
+        assert len(requests) == 1
+        assert not reads
+    else:
+        result = run()
+        assert result["hypothesis"] == "answer"
+        assert result["ctx_tokens"] == (
+            len(R._history_block([])) + len(R._derived_block(derived))
+        ) // 4
+        assert len(requests) == 2
+        assert reads == [True]
+    assert requests[0][1]["defer"] is False

@@ -29,6 +29,9 @@ external memory service.
 1. A running Loom server and a bearer token with write access. See the
    [Loom repo](https://github.com/ClickHouse/loom) for `make dev` and
    `mint-token`.
+   The adapter uses org `dev`, agent `lme-loom` and a random `lme-...`
+   namespace per question. An isolated test deployment must authorize those
+   scopes for extraction and search; the adapter does not provision grants.
 2. `OPENAI_API_KEY` in the environment (used by the reader model, default
    `gpt-4o`, and by the judge).
 3. Install the adapter dep (everything else is already in the repo's requirements):
@@ -71,5 +74,14 @@ python src/evaluation/evaluate_qa.py gpt-4o loom/loom_hyp.jsonl data/longmemeval
 - Indexing is one `set_from_messages` per session (the natural unit), run
   concurrently (`--ingest-concurrency`) because each call does LLM extraction
   server-side; a -S question has ~50 sessions.
+- The harness requests inline extraction with `defer: false`. A deferred or
+  queued response stops the run before retrieval; background extraction is not
+  supported by this harness.
+- Failed questions remain in QA and recall denominators. Loaded-latency
+  percentiles use only recorded samples, with measured/skipped counts and null
+  percentiles when no sample exists. They do not count every HTTP attempt.
+- Context size estimates count rendered memory history and structured aggregate
+  operands at four characters per token. They are not provider token counts or
+  total prompt or cost measurements.
 - `run_loom.py` creates a fresh namespace per question, so questions don't leak
   into each other.

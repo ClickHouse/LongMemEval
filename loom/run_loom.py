@@ -284,13 +284,16 @@ async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: 
             if not session:
                 return
             sid = str(sids[i]) if i < len(sids) and sids[i] else ""
-            body: dict = {**identity, "messages": session, "max_tokens": 4096}
+            body: dict = {**identity, "messages": session, "max_tokens": 4096,
+                          "defer": False}
             if sid:
                 body["session_id"] = sid
             if i < len(dates) and _iso(dates[i]):
                 body["observation_date"] = _iso(dates[i])
             async with ingest_sem:
                 resp = await _post(client, base_url + "/v1/memory.set_from_messages", body, token)
+            if resp.get("deferred") or resp.get("queue_id"):
+                raise RuntimeError("Deferred extraction cannot be searched before completion")
             for w in resp.get("written") or []:
                 key = str(w.get("memory_key") or "")
                 if key:
@@ -366,9 +369,9 @@ async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: 
             k: min((sid_to_date[s] for s in ss if s in sid_to_date), default="")
             for k, ss in key_to_sessions.items()
         }
-        # Token efficiency = size of the context Loom actually hands the reader
-        # (the rendered history block, formatting included). ~4 chars/token.
-        ctx_tokens = len(_history_block(hits, key_to_date)) // 4
+        # Estimate retrieval context only, not the full prompt or billed tokens.
+        ctx_tokens = (len(_history_block(hits, key_to_date))
+                      + len(_derived_block(derived))) // 4
         hypothesis = await _answer(client, str(item["question"]), hits,
                                    str(item.get("question_date", "")), model, api_key,
                                    key_to_date=key_to_date, derived=derived)
@@ -540,9 +543,15 @@ async def main() -> int:
 
     # In-run search latency is measured UNDER concurrent-ingest load, which
     # inflates it — reported separately from the clean number below.
-    ld = sorted(r.get("search_ms_loaded", 0.0) for r in results)
-    print(f"\nIn-run search latency UNDER LOAD (concurrent ingest — not comparable): "
-          f"p50 {_pct(ld, 0.5):.0f}ms  p95 {_pct(ld, 0.95):.0f}ms")
+    ld = sorted(r["search_ms_loaded"] for r in results
+                if r.get("search_ms_loaded") is not None)
+    if ld:
+        print(f"\nIn-run search latency UNDER LOAD (concurrent ingest — not comparable): "
+              f"p50 {_pct(ld, 0.5):.0f}ms  p95 {_pct(ld, 0.95):.0f}ms")
+    else:
+        print("\nIn-run search latency: no completed search samples")
+    print(f"In-run search latency counts: measured {len(ld)}, "
+          f"skipped (no sample) {len(results) - len(ld)}")
 
     # Clean serving latency: re-search every question one-at-a-time on the now-
     # quiesced server (no concurrent ingest) — the true single-query serving
@@ -589,7 +598,10 @@ async def main() -> int:
             "recall_fact_pct": round(sum(r.get("fact_in_context", False) for r in results) / n * 100, 1),
             "ctx_tokens_median": tok_median, "ctx_tokens_mean": tok_mean,
             "hyde_fired_pct": round(hyde_n / n * 100, 1),
-            "latency_loaded_p50_ms": round(_pct(ld, 0.5)), "latency_loaded_p95_ms": round(_pct(ld, 0.95)),
+            "latency_loaded_p50_ms": round(_pct(ld, 0.5)) if ld else None,
+            "latency_loaded_p95_ms": round(_pct(ld, 0.95)) if ld else None,
+            "latency_loaded_measured_n": len(ld),
+            "latency_loaded_skipped_n": n - len(ld),
             "latency_clean_p50_ms": round(_pct(clean, 0.5)) if clean else None,
             "latency_clean_p95_ms": round(_pct(clean, 0.95)) if clean else None,
             "latency_clean_eligible_n": len(latency_results) if args.measure_latency else None,
