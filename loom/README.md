@@ -84,5 +84,8 @@ python src/evaluation/evaluate_qa.py gpt-4o loom/loom_hyp.jsonl data/longmemeval
 - Context size estimates count rendered memory history and structured aggregate
   operands at four characters per token. They are not provider token counts or
   total prompt or cost measurements.
-- `run_loom.py` creates a fresh namespace per question, so questions don't leak
-  into each other.
+- Each question uses a random namespace. Both searches explicitly set
+  `namespace_scope: "this"`, including when the deployment default is `all_mine`.
+- The optional post-ingestion search pass is sequential; it does not verify
+  server-wide quiescence or exclude other clients and workers.
+- The adapter HTTPX range preserves the pinned judge client's initialization API.
