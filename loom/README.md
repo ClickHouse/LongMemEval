@@ -73,7 +73,7 @@ python src/evaluation/evaluate_qa.py gpt-4o loom/loom_hyp.jsonl data/longmemeval
   sees the gold `question_type`.
 - Indexing is one `set_from_messages` per session (the natural unit), run
   concurrently (`--ingest-concurrency`) because each call does LLM extraction
-  server-side; a -S question has ~50 sessions.
+  server-side.
 - The harness requests inline extraction with `defer: false`. A deferred or
   queued response aborts the run. The affected question does not proceed to
   retrieval or its reader; other concurrent questions may already have

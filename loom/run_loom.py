@@ -95,10 +95,8 @@ def _iso(longmemeval_date: str) -> str:
 
 async def _post(client: httpx.AsyncClient, url: str, body: dict, token: str,
                 *, retries: int = 3) -> dict:
-    """POST with retry + backoff on transient failures: network/timeout errors,
-    429, and 5xx. A dropped index/search would silently corrupt recall, so
-    transient network blips and ClickHouse write contention must be ridden out.
-    A non-429 4xx (a genuine client error) raises immediately, not retried."""
+    """POST with retry/backoff for network errors, 429 and 5xx.
+    Other 4xx raise immediately; POST redirects are refused."""
     if retries < 1:
         raise ValueError(f"retries must be >= 1, got {retries}")
     headers = {"Content-Type": "application/json"}
@@ -139,27 +137,19 @@ async def _post(client: httpx.AsyncClient, url: str, body: dict, token: str,
 
 
 def _pct(xs: list, q: float):
-    """Nearest-rank percentile on a 0-based sorted list. int(len*q)
-    over-selects the upper tail (p95 -> the max at n=20); indexing off
-    (len-1) maps q in [0,1] cleanly to min..max. Module-level so it's
-    unit-testable — it drives the reported p50/p95 latency + token metrics."""
+    """Select round((len(xs) - 1) * q) from a sorted sample list."""
     return xs[round((len(xs) - 1) * q)] if xs else 0
 
 
 def _history_block(hits: list[dict], key_to_date: dict | None = None) -> str:
-    """Render retrieved memories as dated blocks, oldest first (mirrors the
-    official run_generation.py per-session formatting)."""
+    """Render retrieved memories as dated blocks, oldest first."""
     key_to_date = key_to_date or {}
     def date_of(h: dict) -> str:
         d = (h.get("valid_at") or h.get("temporal_anchor") or "").strip()
         if d.startswith("1970-01-01"):  # epoch sentinel = undated
             d = ""
         if not d:
-            # Fallback to the SOURCE SESSION's observation_date. ~90% of stored
-            # memories have a NULL temporal_anchor (extraction forces NULL for
-            # durable/state facts), which made date-diff questions render
-            # "Date: unknown" and the reader answer "cannot calculate" — even
-            # though the operand IS the session date the bench holds at ingest.
+            # Fall back to the source session date when the memory has no date.
             d = (key_to_date.get(str(h.get("memory_key") or "")) or "").strip()
         return d[:10] if d else ""
 
@@ -236,13 +226,9 @@ async def _answer(client: httpx.AsyncClient, question: str, hits: list[dict],
             computed=_derived_block(derived),
         )}],
     }
-    # Reasoning models (gpt-5, o-series) reject temperature != 1 and use
-    # max_completion_tokens (not max_tokens) — and a small cap truncates their
-    # hidden reasoning. Non-reasoning temperature/output-cap settings match
-    # run_generation.py (max_tokens = gen_length = 800 for the CoT prompt).
-    # The reader prompt is adapted above; full reader parity is not claimed.
-    # Reasoning models are left uncapped: the official harness predates them,
-    # so there is no official cap to match.
+    # The reasoning-model branch omits temperature and output-token limits.
+    # Non-reasoning settings match the native CoT temperature/output cap;
+    # the prompt remains adapted and model compatibility needs qualification.
     if not re.match(r"^(gpt-5|o[1-9])", model):
         body["temperature"] = 0.0
         body["max_tokens"] = 800
@@ -274,9 +260,7 @@ async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: 
             if sids[i] and _iso(dates[i])
         }
 
-        # 1-2) Index every session (concurrently, bounded). One memory.set_from_messages
-        # per session is the natural indexing unit and the only tractable granularity
-        # on -S (~50 sessions/question). Each call runs LLM extraction server-side.
+        # Index each session with bounded concurrency and server-side extraction.
         ingest_sem = asyncio.Semaphore(max(1, ingest_conc))
 
         async def ingest(i: int, session: list) -> None:
@@ -314,7 +298,7 @@ async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: 
             search_body["observation_date"] = q_iso
         _t0 = time.perf_counter()
         resp = await _post(client, base_url + "/v1/memory.search", search_body, token)
-        search_ms = (time.perf_counter() - _t0) * 1000.0  # NB: under-load (concurrent ingest)
+        search_ms = (time.perf_counter() - _t0) * 1000.0  # in-run search measurement
         hits = resp.get("results", [])
         hyde_fired = bool(resp.get("hyde_fallback_used"))
         # Server-computed COUNT/SUM/date-diff over per-occurrence
@@ -455,9 +439,7 @@ async def main() -> int:
                       f"[{r['question_type']}]", flush=True)
             except (httpx.HTTPError, KeyError) as e:
                 print(f"  ! {item.get('question_id', '?')} ERROR: {e}", file=sys.stderr, flush=True)
-                # Record a placeholder so a harness failure still counts in the
-                # denominator (empty hypothesis -> judged wrong) rather than
-                # silently dropping the question and inflating QA accuracy/recall.
+                # Keep handled failures in the completed-run question population.
                 results.append({
                     "question_id": item.get("question_id", ""),
                     "question_type": item.get("question_type", "unknown"),
@@ -500,8 +482,7 @@ async def main() -> int:
     print(f"  {'OVERALL':28} {sum(ctot)}/{len(ctot)} "
           f"({sum(ctot) / len(ctot) * 100:.1f}%)" if ctot else "  (no results)")
 
-    # Fact-level recall@k by question type: did the gold answer string actually
-    # reach the reader? This is the number that tracks QA (session recall does not).
+    # Summarize gold-answer string presence, not semantic QA correctness.
     fby: dict[str, list[bool]] = defaultdict(list)
     for r in results:
         fby[r["question_type"]].append(r.get("fact_in_context", False))
@@ -513,7 +494,7 @@ async def main() -> int:
     print(f"  {'OVERALL':28} {sum(ftot)}/{len(ftot)} "
           f"({sum(ftot) / len(ftot) * 100:.1f}%)" if ftot else "  (no results)")
 
-    # Token efficiency: the size of the context Loom hands the reader per query.
+    # Summarize the character-derived retrieval-context estimate.
     toks = sorted(r.get("ctx_tokens", 0) for r in results)
     tok_median = _pct(toks, 0.5)
     tok_mean = round(sum(toks) / len(toks)) if toks else 0
@@ -521,13 +502,13 @@ async def main() -> int:
     print(f"\nTOKEN efficiency (context served to reader, ~4 chars/token):"
           f"\n  median {tok_median} tok/query   mean {tok_mean}   (~{mem_mean} memories/query)")
 
-    # HyDE fallback firing rate (recall-rescue LLM call; fires only on a weak top hit).
+    # Count the server-reported fallback flag.
     hyde_n = sum(1 for r in results if r.get("hyde_fired"))
     print(f"\nHyDE fallback fired on {hyde_n}/{len(results)} "
           f"({hyde_n / len(results) * 100:.1f}%) queries" if results else "")
 
-    # In-run search latency is measured UNDER concurrent-ingest load, which
-    # inflates it — reported separately from the clean number below.
+    # These samples come from the main question pass. Other questions may be
+    # ingesting concurrently; no server-wide load or isolation is measured.
     ld = sorted(r["search_ms_loaded"] for r in results
                 if r.get("search_ms_loaded") is not None)
     if ld:
