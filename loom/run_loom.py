@@ -300,22 +300,13 @@ async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: 
 
         await asyncio.gather(*(ingest(i, s) for i, s in enumerate(sessions)))
 
-        # 3) Retrieve. search_mode=rrf lets Loom's planner self-route (it never
-        # sees the gold question_type). NO reranker: the builtin:openai generative
-        # reranker cost ~6-10s/search (one gpt-4o-mini JSON-gen call over 150
-        # candidates) and was quality-NEGATIVE here — paired A/B on identical data
-        # scored rerank-OFF 85.7% vs rerank-ON 78.6% QA, and fact-recall@50 rrf
-        # 37.9% vs plain-cosine 39.7% (tied). RRF fusion over CH's vector+lexical+
-        # chunk planes is the ranker; CH's vector read is 0.36s. This matches Loom's
-        # product default (rerank=""), so the bench now reflects real Loom latency.
+        # Retrieve using the selected search mode.
         search_body: dict = {
             **identity, "namespace_scope": "this",
             "query": str(item["question"]), "top_k": top_k,
             "search_mode": search_mode, "alpha": 0.5, "include_top_n_unmatched": 120,
         }
-        # retrieval_budget="fast" = pure vector path: no query-planning / HyDE LLM
-        # on the read path. On this benchmark it holds recall + accuracy at ~7x
-        # lower latency, since the LLM-in-loop work doesn't change what's retrieved.
+        # Forward an explicitly selected retrieval budget.
         if retrieval_budget:
             search_body["retrieval_budget"] = retrieval_budget
         q_iso = _iso(str(item.get("question_date", "")))
@@ -331,8 +322,8 @@ async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: 
         # reader then falls back to counting the recalled passages by hand.
         derived = resp.get("derived_aggregate")
 
-        # Evidence-session recall@k: did retrieval surface a memory from any
-        # labelled gold evidence session? (the standard LongMemEval retrieval metric)
+        # Custom diagnostic: any labelled evidence session in retrieved memory.
+        # Aggregation includes all questions, including abstention cases.
         answer_sessions = {str(s) for s in (item.get("answer_session_ids") or []) if s}
         retrieved = set()
         for h in hits[:top_k]:
@@ -340,13 +331,10 @@ async def _run_item(client: httpx.AsyncClient, base_url: str, token: str, item: 
         retrieved.discard("")
         recalled = bool(answer_sessions & retrieved) if answer_sessions else False
         # ALL-session coverage@k: did the top-k cover EVERY gold evidence session?
-        # This is the real multi-hop completeness metric. "recalled" (ANY gold
-        # session) over-counts: a 5-session question scores a hit on 1 of 5.
+        # Any-session coverage alone does not establish complete multi-hop evidence.
         all_covered = bool(answer_sessions) and answer_sessions <= retrieved
 
-        # Fact-level recall@k: is the gold ANSWER string actually present in any
-        # retrieved excerpt? Session recall ("a memory from the gold session came
-        # back") systematically over-counts vs QA; this tracks QA far better.
+        # String-presence diagnostic; this is not a semantic QA judgement.
         gold = re.sub(r"\s+", " ", str(item.get("answer", "")).strip().lower())
 
         def _present(hay: str) -> bool:
@@ -415,10 +403,7 @@ async def main() -> int:
                    help="concurrent index calls per question")
     p.add_argument("--answer-model", default="gpt-4o", help="reader model (OpenAI)")
     p.add_argument("--retrieval-budget", default="",
-                   help="Loom retrieval budget. 'fast' = pure vector path, no "
-                        "query-planning/HyDE LLM on the read path (lowest latency); "
-                        "'' = product default. On LongMemEval, fast holds recall + "
-                        "accuracy at ~7x lower latency.")
+                   help="optional Loom retrieval budget; omitted when empty")
     p.add_argument("--measure-latency", action="store_true",
                    help="re-search eligible questions sequentially after this harness's ingestion; "
                         "other clients or background work may still load the server")
